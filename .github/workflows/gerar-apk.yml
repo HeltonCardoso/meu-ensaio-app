@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   apk:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
 
@@ -19,8 +19,10 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Instalar o kit do Android
-        uses: android-actions/setup-android@v3
+      - name: Conferir o kit do Android
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls "$ANDROID_HOME" || echo "::error::Kit do Android não encontrado no servidor"
 
       - uses: gradle/actions/setup-gradle@v4
         with:

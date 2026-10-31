@@ -1320,15 +1320,34 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
     0xE4C0: 'fermata', 0xE4C1: 'fermata', 0xE047: 'segno', 0xE048: 'coda',
   };
   for (let c = 0; c <= 9; c++) SMUFL[0xE080 + c] = 'time-' + c;
-  const MUSIC_FONT = /maestro|petrucci|bravura|leland|opus|sonata|emmentaler|feta|gonville|petaluma|jazz|engraver ?font|broadway|november|ekmelos|finale|musejazz|sebastian|norfolk|toccata|helsinki|reprise|inkpen|aloisen|golden|tamburo|musescore|musicalsymbols|lassus/i;
+  const MUSIC_FONT = /interlude|maestro|petrucci|bravura|leland|opus|sonata|emmentaler|feta|gonville|petaluma|jazz|engraver ?font|broadway|november|ekmelos|finale|musejazz|sebastian|norfolk|toccata|helsinki|reprise|inkpen|aloisen|golden|tamburo|musescore|musicalsymbols|lassus/i;
   const TEXTISH_MUSIC = /text/i; // "EngraverTextT", "MaestroText"... são fontes de texto
+
+  // caractere -> código MacRoman (fontes estilo Sonata com codificação própria trazem o caractere certo no ToUnicode)
+  const MAC_HI = 'ÄÅÇÉÑÖÜáàâäãåçéèêëíìîïñóòôöõúùûü†°¢£§•¶ß®©™´¨≠ÆØ∞±≤≥¥µ∂∑∏π∫ªºΩæø¿¡¬√ƒ≈∆«»… ÀÃÕŒœ–—“”‘’÷◊ÿŸ⁄€‹›ﬁﬂ‡·‚„‰ÂÊÁËÈÍÎÏÌÓÔ\uF8FFÒÚÛÙıˆ˜¯˘˙˚¸˝˛ˇ';
+  const MAC_CODE = {}; for (let i = 0; i < MAC_HI.length; i++) MAC_CODE[MAC_HI[i]] = 128 + i;
+  function sonataCode(g) {
+    const u = g.uni;
+    if (u && u.length === 1) {
+      const c = u.charCodeAt(0);
+      if (c >= 32 && c < 127) return c;
+      if (MAC_CODE[u] !== undefined) return MAC_CODE[u];
+      if (c >= 0xF020 && c <= 0xF0FF) return c - 0xF000;
+    }
+    return g.code;
+  }
+  // símbolos específicos de algumas fontes
+  const FONT_EXTRA = [
+    [/interlude/i, { 60: 'clef-F', 62: 'accent' }],
+  ];
 
   function classify(g) {
     const cp = g.uni ? g.uni.codePointAt(0) : 0;
     if (cp >= 0xE000 && cp <= 0xF8FF && SMUFL[cp]) return SMUFL[cp];
     if (MUSIC_FONT.test(g.font) && !TEXTISH_MUSIC.test(g.font)) {
-      if (cp >= 0xF000 && cp <= 0xF0FF && SONATA[cp - 0xF000]) return SONATA[cp - 0xF000];
-      return SONATA[g.code] || 'music-other';
+      const code = sonataCode(g);
+      for (const [re, tbl] of FONT_EXTRA) if (re.test(g.font) && tbl[code]) return tbl[code];
+      return SONATA[code] || SONATA[g.code] || 'music-other';
     }
     // Unicode musical comum em fontes de texto
     const UNI = { '♭': 'acc-flat', '♯': 'acc-sharp', '♮': 'acc-natural', '𝄢': 'clef-F', '𝄞': 'clef-G' };
@@ -1488,8 +1507,14 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
     }
 
     // título
-    const page0Rows = textRows.filter(r => r.page === 0).sort((a, b) => b.size - a.size);
-    titleGuess = (page0Rows[0] && page0Rows[0].text) || '';
+    // título: só os glifos do maior tamanho da 1ª página
+    {
+      const t0 = pdf.pages[0].glyphs.filter(g => !classify(g));
+      const big = Math.max(0, ...t0.map(g => g.size));
+      const tg = t0.filter(g => g.size >= big * 0.9);
+      const rr = groupRows(tg, 0).sort((a, b) => a.y - b.y);
+      titleGuess = rr.length ? rr[0].text : '';
+    }
     let partName = '';
     for (const r of textRows) {
       if (r.page !== 0) continue;
@@ -2820,7 +2845,11 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
           // bemol/sustenido de cifra (pequeno, fora da pauta) vira texto
           if (/^acc-/.test(k) && isChordAcc(g, pg)) { txt.push(Object.assign({ kind: k }, g)); continue; }
           body += musicGlyph(g, k);
-        } else if (k === null || /-text$/.test(k) || k === 'music-other') { if (k !== 'music-other') txt.push(Object.assign({ kind: k ? k.replace('-text', '') : null }, g)); }
+        } else if (k === 'music-other' || k === 'accent') {
+          // dinâmicas (f, p, mf...) e acentos da fonte musical
+          if (/^[fpmzsr]$/.test(g.uni || '')) body += `<text x="${g.x.toFixed(2)}" y="${g.y.toFixed(2)}" font-size="${(g.size * 0.62).toFixed(2)}" font-family="Georgia,serif" font-style="italic" font-weight="700">${esc(g.uni)}</text>`;
+          else if (g.uni === '>' || k === 'accent') body += `<text x="${g.x.toFixed(2)}" y="${g.y.toFixed(2)}" font-size="${(g.size * 0.6).toFixed(2)}" font-family="sans-serif">&gt;</text>`;
+        } else if (k === null || /-text$/.test(k)) { txt.push(Object.assign({ kind: k ? k.replace('-text', '') : null }, g)); }
       }
       body += textRuns(txt);
       // compassos clicáveis e destaque

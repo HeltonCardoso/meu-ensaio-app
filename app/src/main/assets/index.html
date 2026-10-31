@@ -103,6 +103,13 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
 .mlist b{color:var(--accent)}
 .help p{margin:.4em 0}
 
+.fb-wrap{background:#1c1f27;border-bottom:1px solid var(--line);padding:4px 8px 6px}
+.fretboard svg{display:block;width:100%;height:96px}
+.fretboard{width:100%}
+.fb-cur{fill:var(--accent);stroke:#fff;stroke-width:2}
+.fb-next{fill:none;stroke:#8fd3ff;stroke-width:3;stroke-dasharray:4 3}
+.fb-label{font-size:.85rem;min-height:1.2em;padding:2px 2px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
 </style>
 </head>
 <body>
@@ -140,6 +147,7 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
     <div class="nb-n"><span class="lbl">Nota</span><span id="now-note">—</span></div>
     <div class="nb-c"><span class="lbl">Acorde</span><span id="now-chord">—</span><span class="next" id="next-chord"></span></div>
   </div>
+  <div id="fb-wrap" class="fb-wrap" hidden></div>
   <div id="warn-bar" class="warn-bar" hidden></div>
   <div class="score-wrap" id="score-wrap"><div id="score"></div></div>
 
@@ -171,6 +179,18 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
       <div class="group" id="parts-group">
         <b>Instrumento</b>
         <div id="parts"></div>
+        <div class="row between"><span class="muted">Timbre do baixo</span>
+          <select id="bass-tone"><option value="dedo">Dedo (padrão)</option><option value="palheta">Palheta</option><option value="slap">Slap</option><option value="fretless">Fretless</option><option value="abafado">Abafado (palm mute)</option><option value="acustico">Acústico (rabecão)</option><option value="synth">Synth bass</option></select></div>
+        <label class="switch"><input type="checkbox" id="fb-on"><span></span> Mostrar o braço do baixo (corda e casa)</label>
+        <div class="row between"><span class="muted">Cordas</span><select id="fb-strings"><option value="4">4 cordas</option><option value="5">5 cordas (Si grave)</option><option value="6">6 cordas</option></select></div>
+      </div>
+
+      <div class="group" id="drums-group">
+        <b>Bateria</b>
+        <div class="row between"><span class="muted">Levada</span><select id="drum-style"><option value="">Desligada</option></select></div>
+        <div class="row between"><span class="muted">Volume</span><input type="range" id="drum-vol" min="0" max="100" value="70"></div>
+        <label class="switch"><input type="checkbox" id="drum-fills" checked><span></span> Viradas (a cada 8 compassos e antes das repetições)</label>
+        <p class="muted small">A bateria segue o compasso, o andamento, o swing e o rit. da partitura.</p>
       </div>
 
       <div class="group" id="chords-group">
@@ -2295,6 +2315,226 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
   global.Singer = { sing, voiceMidi, speak, canSpeak, SOLFEGE };
 })(typeof window !== 'undefined' ? window : globalThis);
 
+// drums.js — levadas de bateria que acompanham a partitura (compasso, andamento, swing, rit., repetições)
+(function (global) {
+  'use strict';
+
+  // grade: 16 = semicolcheias em 4/4 (4 por tempo); 12 = tercinas (3 por tempo)
+  // k bumbo, s caixa, x aro (cross-stick), h chimbal fechado, o chimbal aberto, r condução (ride), f chimbal no pé
+  // 'X' acento, 'x' normal, 'g' fantasma
+  const STYLES = {
+    pop:     { name: 'Pop / Rock', grid: 16, p: { k: 'x.......x.x.....', s: '....X.......X...', h: 'x.x.x.x.x.x.x.x.' } },
+    balada:  { name: 'Balada / louvor lento', grid: 16, p: { k: 'x.........x.....', x: '....x.......x...', h: 'x.g.x.g.x.g.x.g.' } },
+    louvor:  { name: 'Louvor animado', grid: 16, p: { k: 'x.....x.x.....x.', s: '....X.......X...', h: 'x.x.x.x.x.x.x.o.' } },
+    country: { name: 'Country', grid: 16, p: { k: 'x.......x.......', s: '..g.X.g...g.X.g.', h: 'x.x.x.x.x.x.x.x.' } },
+    shuffle: { name: 'Shuffle / Blues', grid: 12, p: { k: 'x.....x.....', s: '...X.....X..', h: 'x.xx.xx.xx.x' } },
+    jazz:    { name: 'Jazz / Swing', grid: 12, p: { r: 'x..x.xx..x.x', f: '...x.....x..', k: 'g.....g.....' } },
+    bossa:   { name: 'Bossa nova', grid: 16, p: { k: 'x..xx..xx..xx..x', x: 'x..x..x...x..x..', h: 'g.g.g.g.g.g.g.g.' } },
+    gospel:  { name: 'Gospel (com balanço)', grid: 12, p: { k: 'x....xx.....', s: '...X.....X..', h: 'x.xx.xx.xx.x' } },
+  };
+  const WALTZ = { grid: 12, p: { k: 'x...........', s: '....x...x...', h: 'x...x...x...' } };       // 3/4 (4 por tempo)
+  const COMPOUND = { k: 'x.....', s: '...X..', h: 'xxxxxx' };                                        // 6/8: 1 passo = colcheia
+
+  const VEL = { X: 1.15, x: 0.85, g: 0.35, o: 0.8 };
+
+  function make(tl, styleKey, opts) {
+    opts = opts || {};
+    const st = STYLES[styleKey];
+    if (!st || !tl || !tl.markers.length) return [];
+    const r = tl.swing || 0;
+    const sw = off => { // swing nas colcheias (só grade 16)
+      if (!r || st.grid !== 16) return off;
+      const b = Math.floor(off + 1e-9), f = off - b;
+      return b + (f < 0.5 ? f * 2 * r : r + (f - 0.5) * 2 * (1 - r));
+    };
+    const ev = [];
+    const push = (q, d, v) => ev.push({ q, d, v });
+    const mk = tl.markers;
+    let crashNext = true;
+    mk.forEach((m, i) => {
+      const [b, bt] = m.timeSig || [4, 4];
+      const last = i === mk.length - 1;
+      const next = mk[i + 1];
+      const beforeJump = next && next.mIdx < m.mIdx; // fim de um trecho que repete
+      const fill = opts.fills !== false && !last && (beforeJump || (i + 1) % 8 === 0) && m.lenQ >= 2;
+      const crash = crashNext && m.lenQ >= 1;
+      crashNext = fill;
+      if (last) { push(m.q, 'c', 1); push(m.q, 'k', 1); return; }
+      if (crash) push(m.q, 'c', 0.9);
+
+      // compasso composto (6/8, 9/8, 12/8): um passo por colcheia
+      if (bt === 8 && b % 3 === 0) {
+        const n = Math.round(m.lenQ * 2);
+        for (let j = 0; j < n; j++) {
+          const qq = m.q + j * 0.5, step = j % 6;
+          for (const inst of Object.keys(COMPOUND)) {
+            const c = COMPOUND[inst][step];
+            if (c !== '.') push(qq, inst, VEL[c] || 0.8);
+          }
+        }
+        return;
+      }
+      const triple = b === 3 && bt === 4 && styleKey !== 'jazz';
+      const pat = triple ? WALTZ : st;
+      const per = pat.grid === 16 || triple ? 4 : 3; // passos por tempo
+      const beatsInBar = triple ? 3 : 4;
+      const nominal = b * 4 / bt;
+      const nBeats = Math.max(1, Math.round(m.lenQ));
+      const shift = m.lenQ < nominal - 1e-6 ? Math.round(nominal - m.lenQ) : 0; // anacruse: alinha pelo fim
+      for (let bi = 0; bi < nBeats; bi++) {
+        const pb = (bi + shift) % beatsInBar;
+        const isFillBeat = fill && bi === nBeats - 1;
+        for (let sIdx = 0; sIdx < per; sIdx++) {
+          const off = bi + sIdx / per;
+          const qq = m.q + sw(off);
+          if (isFillBeat) {
+            // virada: 4 semicolcheias (caixa e tons descendo)
+            const seq = ['s', 't1', 't2', 't3'];
+            if (per === 4) push(qq, seq[sIdx], 0.75 + sIdx * 0.08);
+            else push(qq, ['s', 't1', 't3'][sIdx], 0.8 + sIdx * 0.1);
+            if (sIdx === 0) push(qq, 'k', 0.7);
+            continue;
+          }
+          for (const inst of Object.keys(pat.p)) {
+            const c = pat.p[inst][pb * per + sIdx];
+            if (c && c !== '.') push(qq, c === 'o' ? 'o' : inst, VEL[c] || 0.8);
+          }
+        }
+      }
+    });
+    ev.forEach(e => { e.t = tl.secAt(e.q); });
+    ev.sort((a, b) => a.t - b.t);
+    return ev;
+  }
+
+  global.Drums = { STYLES, make };
+})(typeof window !== 'undefined' ? window : globalThis);
+
+// fretboard.js — mostra no braço do baixo onde tocar cada nota (corda e casa)
+(function (global) {
+  'use strict';
+  // altura ESCRITA das cordas soltas (baixo é escrito uma oitava acima do som)
+  const TUNINGS = {
+    4: [{ n: 'Mi', m: 40 }, { n: 'Lá', m: 45 }, { n: 'Ré', m: 50 }, { n: 'Sol', m: 55 }],
+    5: [{ n: 'Si', m: 35 }, { n: 'Mi', m: 40 }, { n: 'Lá', m: 45 }, { n: 'Ré', m: 50 }, { n: 'Sol', m: 55 }],
+    6: [{ n: 'Si', m: 35 }, { n: 'Mi', m: 40 }, { n: 'Lá', m: 45 }, { n: 'Ré', m: 50 }, { n: 'Sol', m: 55 }, { n: 'Dó', m: 60 }],
+  };
+  const MAXF = 20;
+
+  // escolhe corda/casa para cada nota da parte, tentando ficar na mesma região do braço
+  function fingerings(notes, nStrings, octaveFix) {
+    const tun = TUNINGS[nStrings] || TUNINGS[4];
+    const lo = tun[0].m, hi = tun[tun.length - 1].m + MAXF;
+    let hand = 3; // posição da mão (casa)
+    const out = new Map();
+    for (const n of notes) {
+      let m = n.midi + (octaveFix || 0);
+      while (m < lo) m += 12;
+      while (m > hi) m -= 12;
+      let best = null, bc = Infinity;
+      tun.forEach((s, si) => {
+        const f = m - s.m;
+        if (f < 0 || f > MAXF) return;
+        // custo: distância da mão + preferência por casas baixas; corda solta é fácil
+        let cost = f === 0 ? Math.abs(hand - 2) * 0.35 : Math.abs(f - hand) + (f > hand + 3 || f < hand - 1 ? 2 : 0);
+        cost += f * 0.08;
+        if (cost < bc) { bc = cost; best = { s: si, f, name: s.n }; }
+      });
+      if (best) {
+        out.set(n, best);
+        if (best.f > 0) hand = best.f <= hand - 1 || best.f >= hand + 3 ? Math.max(1, best.f - 1) : hand;
+      }
+    }
+    return out;
+  }
+
+  // desenha o braço (SVG). Retorna { el, show(cur, next) }
+  function create(container, nStrings) {
+    const tun = TUNINGS[nStrings] || TUNINGS[4];
+    const ns = tun.length;
+    let W = 1000; const padL = 46, padR = 12, rowH = ns > 4 ? 21 : 26, padT = 14, H = padT * 2 + rowH * (ns - 1);
+    let first = 0, span = 12; // janela de casas mostrada
+    const host = document.createElement('div');
+    host.className = 'fretboard';
+    container.innerHTML = '';
+    container.appendChild(host);
+    const label = document.createElement('div');
+    label.className = 'fb-label';
+    container.appendChild(label);
+    let lastKey = '';
+
+    function xOf(f) { // centro da casa f (0 = corda solta, antes da pestana)
+      const w = (W - padL - padR) / span;
+      if (f === 0) return padL - 20;
+      return padL + (f - first - 0.5) * w;
+    }
+    function yOf(si) { return padT + (ns - 1 - si) * rowH; } // corda mais grave embaixo
+
+    let lastCur = null, lastNext = null;
+    function draw(curF, nextF) {
+      lastCur = curF; lastNext = nextF;
+      // largura do desenho acompanha a tela (sem distorcer)
+      const pxW = host.clientWidth || container.clientWidth || 380;
+      W = Math.max(320, Math.round(pxW * H / 96));
+      span = W < 600 ? 9 : 12;
+      if (first > MAXF - span) first = MAXF - span;
+      const w = (W - padL - padR) / span;
+      let svg = `<svg viewBox="0 0 ${W} ${H}">`;
+      svg += `<rect x="${padL}" y="${padT - 8}" width="${W - padL - padR}" height="${H - 2 * padT + 16}" rx="4" fill="#3a2a1c"/>`;
+      // marcações (3,5,7,9,12,15,17,19)
+      for (let f = first + 1; f <= first + span; f++) {
+        const cx = padL + (f - first - 0.5) * w, cy = H / 2;
+        if ([3, 5, 7, 9, 15, 17, 19].includes(f)) svg += `<circle cx="${cx}" cy="${cy}" r="6" fill="#d9c8a8" opacity=".55"/>`;
+        if (f === 12) svg += `<circle cx="${cx}" cy="${cy - rowH * 0.9}" r="6" fill="#d9c8a8" opacity=".55"/><circle cx="${cx}" cy="${cy + rowH * 0.9}" r="6" fill="#d9c8a8" opacity=".55"/>`;
+        svg += `<text x="${cx}" y="${H - 1}" text-anchor="middle" font-size="11" fill="#9aa1b2">${f}</text>`;
+      }
+      // trastes
+      for (let f = first; f <= first + span; f++) {
+        const x = padL + (f - first) * w;
+        svg += `<line x1="${x}" y1="${padT - 8}" x2="${x}" y2="${H - padT + 8}" stroke="${f === 0 ? '#eee' : '#b9b9b9'}" stroke-width="${f === 0 ? 6 : 2}"/>`;
+      }
+      // cordas
+      tun.forEach((s, si) => {
+        const y = yOf(si);
+        svg += `<line x1="${padL - 30}" y1="${y}" x2="${W - padR}" y2="${y}" stroke="#d8d0c0" stroke-width="${1.5 + (ns - si) * 0.55}"/>`;
+        svg += `<text x="4" y="${y + 5}" font-size="14" font-weight="700" fill="#cfd3dc">${s.n}</text>`;
+      });
+      const dot = (p, cls, txt) => {
+        if (!p) return '';
+        const cx = xOf(p.f), cy = yOf(p.s);
+        return `<circle class="${cls}" cx="${cx}" cy="${cy}" r="11"/>` + (txt ? `<text x="${cx}" y="${cy + 4.5}" text-anchor="middle" font-size="12" font-weight="800" fill="#1a1406">${txt}</text>` : '');
+      };
+      svg += dot(nextF, 'fb-next', '');
+      svg += dot(curF, 'fb-cur', curF ? String(curF.f) : '');
+      svg += '</svg>';
+      host.innerHTML = svg;
+    }
+
+    function show(curF, nextF, curName) {
+      const key = (curF ? curF.s + ':' + curF.f : '-') + '|' + (nextF ? nextF.s + ':' + nextF.f : '-');
+      if (key === lastKey) return;
+      lastKey = key;
+      // ajusta a janela para caber a nota atual e a próxima
+      const fs = [curF, nextF].filter(Boolean).map(p => p.f).filter(f => f > 0);
+      if (fs.length) {
+        const mn = Math.min(...fs), mx = Math.max(...fs);
+        if (mn <= first || mx > first + span) first = Math.max(0, Math.min(MAXF - span, mn <= 4 ? 0 : mn - 2));
+        if (mx > first + span) first = Math.max(0, mx - span);
+      } else if (!curF && !nextF) first = 0;
+      draw(curF, nextF);
+      label.innerHTML = curF
+        ? `<b>${curName || ''}</b> · corda <b>${tun[curF.s].n}</b> · ${curF.f === 0 ? '<b>solta</b>' : 'casa <b>' + curF.f + '</b>'}` + (nextF ? ` <span class="muted">→ depois: ${tun[nextF.s].n}, ${nextF.f === 0 ? 'solta' : 'casa ' + nextF.f}</span>` : '')
+        : (nextF ? `<span class="muted">próxima: corda ${tun[nextF.s].n}, ${nextF.f === 0 ? 'solta' : 'casa ' + nextF.f}</span>` : '');
+    }
+    draw(null, null);
+    let rt = null;
+    window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(() => draw(lastCur, lastNext), 150); });
+    return { show, nStrings: ns };
+  }
+
+  global.Fretboard = { fingerings, create, TUNINGS };
+})(typeof window !== 'undefined' ? window : globalThis);
+
 // Motor de áudio: toca a linha do tempo com Web Audio (sem bibliotecas).
 (function (global) {
   'use strict';
@@ -2309,12 +2549,14 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
       this.speed = 1;             // multiplicador de andamento
       this.loop = null;           // {startSec, endSec}
       this.ramp = { on: false, start: 0.6, step: 0.05, target: 1 }; // acelerar a cada volta
+      this.drums = null;          // eventos de bateria (Drums.make)
+      this.bassTone = 'dedo';     // timbre do baixo
       this.lap = 0;
       this.metronome = false;
       this.countIn = true;
       this.chordsOn = true;
       this.chordStyle = 'sustain'; // 'sustain' | 'beats'
-      this.vol = { master: 0.9, chords: 0.45, click: 0.7 };
+      this.vol = { master: 0.9, chords: 0.45, click: 0.7, drums: 0.7 };
       this.parts = [];            // [{vol, mute, octave, isBass}]
       this.voice = { on: true, mode: 'sing', vol: 0.85, range: 'media', part: 0 }; // voz Dó-Ré-Mi
       this._speakTimers = [];
@@ -2344,6 +2586,8 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
       this.chordBus.connect(this.master); this.chordBus.connect(this.rev);
       this.clickBus = c.createGain(); this.clickBus.gain.value = this.vol.click;
       this.clickBus.connect(this.master);
+      this.drumBus = c.createGain(); this.drumBus.gain.value = this.vol.drums;
+      this.drumBus.connect(this.master);
       this.voiceBus = c.createGain(); this.voiceBus.gain.value = this.voice.vol;
       this.voiceBus.connect(this.master); this.voiceBus.connect(this.rev);
       this.partBuses = [];
@@ -2378,6 +2622,7 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
       this.chordBus.gain.value = this.chordsOn ? this.vol.chords : 0;
       this.clickBus.gain.value = this.vol.click;
       this.voiceBus.gain.value = this.voice.vol;
+      this.drumBus.gain.value = this.vol.drums;
       this.parts.forEach((_, i) => this._partBus(i));
     }
 
@@ -2386,26 +2631,90 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
 
     _bass(t, dur, midi, dest, vel) {
       const c = this.ctx, f = mtof(midi);
-      const o1 = c.createOscillator(); o1.type = 'sawtooth'; o1.frequency.value = f;
-      const o2 = c.createOscillator(); o2.type = 'sine'; o2.frequency.value = f;
-      const o3 = c.createOscillator(); o3.type = 'square'; o3.frequency.value = f / 2;
-      const m1 = c.createGain(); m1.gain.value = 0.35;
-      const m2 = c.createGain(); m2.gain.value = 0.9;
-      const m3 = c.createGain(); m3.gain.value = 0.08;
-      const flt = c.createBiquadFilter(); flt.type = 'lowpass'; flt.Q.value = 2;
-      const cut = Math.min(4000, f * 9);
-      flt.frequency.setValueAtTime(cut * 2.2, t);
-      flt.frequency.exponentialRampToValueAtTime(Math.max(150, f * 2.5), t + 0.25);
+      // timbres: dedo, palheta, slap, fretless, abafado, acustico, synth
+      const P = {
+        dedo:     { saw: 0.35, sine: 0.9, sq: 0.08, cut: 9, cutEnd: 2.5, q: 2, att: 0.006, dec: 0.35, sus: 0.55, click: 0, rel: 0.06 },
+        palheta:  { saw: 0.6, sine: 0.7, sq: 0.1, cut: 16, cutEnd: 5, q: 3, att: 0.002, dec: 0.25, sus: 0.5, click: 0.25, clickF: 3000, rel: 0.05 },
+        slap:     { saw: 0.7, sine: 0.8, sq: 0.2, cut: 30, cutEnd: 4, q: 6, att: 0.001, dec: 0.12, sus: 0.4, click: 0.45, clickF: 2200, rel: 0.05, drop: 1.03 },
+        fretless: { saw: 0.25, sine: 1, sq: 0, cut: 6, cutEnd: 4, q: 7, att: 0.03, dec: 0.6, sus: 0.7, click: 0, rel: 0.12, slide: 0.985, fenv: 0.18 },
+        abafado:  { saw: 0.3, sine: 0.9, sq: 0.05, cut: 5, cutEnd: 1.8, q: 1, att: 0.004, dec: 0.12, sus: 0.12, click: 0.08, clickF: 1200, rel: 0.03, short: true },
+        acustico: { saw: 0.12, sine: 1, sq: 0, tri: 0.5, cut: 6, cutEnd: 2, q: 1, att: 0.004, dec: 0.22, sus: 0.25, click: 0.18, clickF: 900, rel: 0.08 },
+        synth:    { saw: 0.7, sine: 0.4, sq: 0.45, cut: 20, cutEnd: 1.5, q: 9, att: 0.003, dec: 0.18, sus: 0.6, click: 0, rel: 0.05, detune: 7 },
+      }[this.bassTone] || null;
+      const p = P || { saw: 0.35, sine: 0.9, sq: 0.08, cut: 9, cutEnd: 2.5, q: 2, att: 0.006, dec: 0.35, sus: 0.55, click: 0, rel: 0.06 };
+      const nodes = [];
+      const mk = (type, freq, gain) => {
+        const o = c.createOscillator(); o.type = type; o.frequency.value = freq;
+        if (p.detune && type === 'sawtooth') o.detune.value = p.detune;
+        if (p.slide) { o.frequency.setValueAtTime(freq * p.slide, t); o.frequency.exponentialRampToValueAtTime(freq, t + 0.06); }
+        if (p.drop) { o.frequency.setValueAtTime(freq * p.drop, t); o.frequency.exponentialRampToValueAtTime(freq, t + 0.03); }
+        const g = c.createGain(); g.gain.value = gain; o.connect(g); nodes.push(o, g); return g;
+      };
+      const flt = c.createBiquadFilter(); flt.type = 'lowpass'; flt.Q.value = p.q;
+      const cut = Math.min(9000, f * p.cut);
+      flt.frequency.setValueAtTime(Math.max(120, cut), t);
+      flt.frequency.exponentialRampToValueAtTime(Math.max(110, Math.min(6000, f * p.cutEnd)), t + (p.fenv || 0.22));
       const g = c.createGain();
-      const peak = 0.55 * vel, rel = 0.06, end = t + Math.max(0.05, dur);
+      let d = Math.max(0.05, dur);
+      if (p.short) d = Math.min(d, 0.22);
+      const peak = 0.55 * vel, end = t + d, rel = p.rel;
       g.gain.setValueAtTime(0, t);
-      g.gain.linearRampToValueAtTime(peak, t + 0.006);
-      g.gain.exponentialRampToValueAtTime(peak * 0.55, t + 0.35);
-      g.gain.setValueAtTime(peak * 0.55, end);
+      g.gain.linearRampToValueAtTime(peak, t + p.att);
+      g.gain.exponentialRampToValueAtTime(Math.max(0.0005, peak * p.sus), t + p.att + p.dec);
+      g.gain.setValueAtTime(Math.max(0.0005, peak * p.sus), Math.max(t + p.att + 0.01, end));
       g.gain.exponentialRampToValueAtTime(0.0001, end + rel);
-      o1.connect(m1); o2.connect(m2); o3.connect(m3); m1.connect(flt); m3.connect(flt); flt.connect(g); m2.connect(g); g.connect(dest);
-      [o1, o2, o3].forEach(o => { o.start(t); o.stop(end + rel + 0.02); });
-      this._track([o1, o2, o3, g], end + rel);
+      if (p.saw) mk('sawtooth', f, p.saw).connect(flt);
+      if (p.sq) mk('square', f / 2, p.sq).connect(flt);
+      if (p.tri) mk('triangle', f, p.tri).connect(flt);
+      flt.connect(g);
+      if (p.sine) mk('sine', f, p.sine).connect(g);
+      g.connect(dest);
+      if (p.click) this._noiseHit(t, 0.025, p.clickF || 2500, p.click * vel, dest, 'bandpass', 1.5);
+      nodes.forEach(n => { if (n.start) { n.start(t); n.stop(end + rel + 0.02); } });
+      this._track(nodes.concat([flt, g]), end + rel);
+    }
+
+    // ---------- bateria ----------
+    _noiseBuf() {
+      if (this._nb) return this._nb;
+      const len = this.ctx.sampleRate * 1.5, b = this.ctx.createBuffer(1, len, this.ctx.sampleRate), d = b.getChannelData(0);
+      for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+      return (this._nb = b);
+    }
+    _noiseHit(t, len, freq, amp, dest, type, q) {
+      const c = this.ctx;
+      const src = c.createBufferSource(); src.buffer = this._noiseBuf();
+      const fl = c.createBiquadFilter(); fl.type = type || 'bandpass'; fl.frequency.value = freq; fl.Q.value = q || 1;
+      const g = c.createGain();
+      g.gain.setValueAtTime(amp, t); g.gain.exponentialRampToValueAtTime(0.0001, t + len);
+      src.connect(fl); fl.connect(g); g.connect(dest);
+      src.start(t, Math.random() * 1.0); src.stop(t + len + 0.02);
+      this._track([src, fl, g], t + len);
+    }
+    _tone(t, f0, f1, len, amp, dest, type) {
+      const c = this.ctx;
+      const o = c.createOscillator(); o.type = type || 'sine';
+      o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(f1, t + len * 0.8);
+      const g = c.createGain(); g.gain.setValueAtTime(amp, t); g.gain.exponentialRampToValueAtTime(0.0001, t + len);
+      o.connect(g); g.connect(dest); o.start(t); o.stop(t + len + 0.02);
+      this._track([o, g], t + len);
+    }
+    _drum(t, d, v) {
+      const B = this.drumBus;
+      switch (d) {
+        case 'k': this._tone(t, 140, 45, 0.32, 0.9 * v, B); this._noiseHit(t, 0.012, 3000, 0.08 * v, B, 'bandpass', 1); break;
+        case 's': this._tone(t, 210, 160, 0.1, 0.35 * v, B, 'triangle'); this._noiseHit(t, 0.17, 3500, 0.45 * v, B, 'bandpass', 0.7); break;
+        case 'x': this._noiseHit(t, 0.04, 1800, 0.5 * v, B, 'bandpass', 4); this._tone(t, 520, 480, 0.03, 0.2 * v, B, 'square'); break;
+        case 'h': this._noiseHit(t, 0.045, 8500, 0.22 * v, B, 'highpass', 0.7); break;
+        case 'o': this._noiseHit(t, 0.32, 8000, 0.2 * v, B, 'highpass', 0.7); break;
+        case 'f': this._noiseHit(t, 0.03, 7000, 0.14 * v, B, 'highpass', 0.7); break;
+        case 'r': this._noiseHit(t, 0.5, 6500, 0.13 * v, B, 'bandpass', 2.5); this._tone(t, 3100, 3000, 0.4, 0.025 * v, B, 'square'); break;
+        case 'c': this._noiseHit(t, 1.4, 5000, 0.28 * v, B, 'highpass', 0.5); break;
+        case 't1': this._tone(t, 220, 160, 0.25, 0.55 * v, B); break;
+        case 't2': this._tone(t, 165, 120, 0.28, 0.6 * v, B); break;
+        case 't3': this._tone(t, 120, 85, 0.32, 0.65 * v, B); break;
+        default: break;
+      }
     }
 
     _keys(t, dur, midi, dest, vel, amp) {
@@ -2515,7 +2824,7 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
       }
       this._t0 = now + lead;       // tempo de áudio que corresponde a _startPos
       this._startPos = this.pos;
-      this._cursor = { notes: this._idx(this.tl.notes, this.pos), chords: this._idx(this.tl.chords, this.pos), beats: this._idx(this.tl.beats, this.pos) };
+      this._cursor = { notes: this._idx(this.tl.notes, this.pos), chords: this._idx(this.tl.chords, this.pos), beats: this._idx(this.tl.beats, this.pos), drums: this._idx(this.drums || [], this.pos) };
       this._cycleBase = this._t0 - this._startPos / this.speed; // tempo de áudio do segundo 0 da partitura
       this._schedUntil = this._startPos;
       this._segs = [{ audio0: this._t0, score0: this._startPos, speed: this.speed }];
@@ -2572,7 +2881,7 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
             if (this._segs.length > 4) this._segs.shift();
             if (this.onLap) { const lap = this.lap, sp = this.speed; setTimeout(() => this.onLap(lap, sp), Math.max(0, (wrapAudio - ctx.currentTime) * 1000)); }
             this._schedUntil = this.loop.startSec;
-            this._cursor = { notes: this._idx(tl.notes, this.loop.startSec), chords: this._idx(tl.chords, this.loop.startSec), beats: this._idx(tl.beats, this.loop.startSec) };
+            this._cursor = { notes: this._idx(tl.notes, this.loop.startSec), chords: this._idx(tl.chords, this.loop.startSec), beats: this._idx(tl.beats, this.loop.startSec), drums: this._idx(this.drums || [], this.loop.startSec) };
             const prev = tl.chords.filter(c => c.t < this.loop.startSec - 0.001 && c.t + c.d > this.loop.startSec + 0.05).pop();
             if (prev && this.chordsOn) this._chord(this._cycleBase + this.loop.startSec / this.speed, (prev.t + prev.d - this.loop.startSec) / this.speed, prev);
             // ajusta referência de posição para currentPos()
@@ -2624,6 +2933,12 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
         const c = tl.chords[cur.chords];
         if (c.t < fromSec - 0.0005 || !this.chordsOn) continue;
         this._chord(at(c.t), Math.min(c.d, limit - c.t) / sp, c);
+      }
+      const dr = this.drums || [];
+      for (; cur.drums < dr.length && dr[cur.drums].t < toSec; cur.drums++) {
+        const e = dr[cur.drums];
+        if (e.t < fromSec - 0.0005) continue;
+        this._drum(at(e.t), e.d, e.v);
       }
       for (; cur.beats < tl.beats.length && tl.beats[cur.beats].t < toSec; cur.beats++) {
         const b = tl.beats[cur.beats];
@@ -3008,6 +3323,12 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
     Object.assign(engine.voice, { on: set.voiceOn ?? true, mode: set.voiceMode || 'sing', vol: set.voiceVol ?? 0.85, range: set.voiceRange || 'media', part: Math.min(set.voicePart ?? defaultVoicePart(score), score.parts.length - 1) });
     engine.loop = null;
     cur.swing = +set.swing || 0; cur.expressive = set.expressive ?? true;
+    const vp = engine.voice.part, vpart = score.parts[vp] || {};
+    cur.fbOn = set.fbOn ?? !!vpart.isBass; cur.strings = set.strings || 4;
+    cur.drumStyle = set.drumStyle || ''; cur.drumFills = set.drumFills ?? true;
+    engine.vol.drums = set.drumVol ?? 0.7;
+    engine.bassTone = set.bassTone || 'dedo';
+    setupExtras();
     Object.assign(engine.ramp, { on: !!set.rampOn, start: (set.rampStart || 60) / 100, step: (set.rampStep || 5) / 100, target: (set.rampTarget || 100) / 100 });
     syncPanel(set);
     if (set.loop && set.loop.on) applyLoop(true);
@@ -3035,6 +3356,7 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
       parts: engine.parts.map(p => ({ vol: p.vol, mute: p.mute, octave: p.octave })),
       loop: { on: $('#loop-on').checked, from: $('#loop-from').value, to: $('#loop-to').value },
       swing: cur.swing, expressive: cur.expressive,
+      fbOn: cur.fbOn, strings: cur.strings, drumStyle: cur.drumStyle, drumFills: cur.drumFills, drumVol: engine.vol.drums, bassTone: engine.bassTone,
       rampOn: engine.ramp.on, rampStart: Math.round(engine.ramp.start * 100), rampStep: Math.round(engine.ramp.step * 100), rampTarget: Math.round(engine.ramp.target * 100),
     };
     clearTimeout(saveT); saveT = setTimeout(() => { saveT = null; Store.put(rec); }, 500);
@@ -3069,6 +3391,9 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
     $('#expr-on').checked = cur.expressive;
     const ex = [cur.tl.hasRit || cur.score.measures.some(m => m.rit) ? 'rit. no compasso ' + cur.score.measures.filter(m => m.rit).map(m => m.number).join(', ') : '', cur.score.measures.some(m => m.notes.some(n => n.fermata)) ? 'fermata no compasso ' + cur.score.measures.filter(m => m.notes.some(n => n.fermata)).map(m => m.number).join(', ') : ''].filter(Boolean);
     $('#expr-hint').hidden = !ex.length; $('#expr-hint').textContent = 'Encontrei: ' + ex.join(' e ') + '.';
+    $('#bass-tone').value = engine.bassTone;
+    $('#fb-on').checked = cur.fbOn; $('#fb-strings').value = String(cur.strings);
+    $('#drum-style').value = cur.drumStyle; $('#drum-fills').checked = cur.drumFills; $('#drum-vol').value = Math.round(engine.vol.drums * 100);
     $('#ramp-on').checked = engine.ramp.on;
     $('#ramp-start').value = Math.round(engine.ramp.start * 100); $('#ramp-step').value = Math.round(engine.ramp.step * 100); $('#ramp-target').value = Math.round(engine.ramp.target * 100);
     $('#parts').innerHTML = engine.parts.map((p, i) => `<div class="part" data-i="${i}">
@@ -3101,11 +3426,42 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
   function rebuildTimeline() {
     const tl = MusicXML.buildTimeline(cur.score, { swing: cur.swing, expressive: cur.expressive });
     cur.tl = tl;
+    engine.drums = cur.drumStyle ? Drums.make(tl, cur.drumStyle, { fills: cur.drumFills }) : null;
     engine.replaceTimeline(tl);
+    computeFing();
     if ($('#loop-on').checked) applyLoop(true);
     $('#t-tot').textContent = fmtTime(tl.totalSec / engine.speed);
     updateNow(true); save();
   }
+  // ---- braço do baixo, bateria, timbre ----
+  let fb = null;
+  function computeFing() {
+    if (!cur) return;
+    const vp = engine.voice.part, part = cur.score.parts[vp] || {};
+    const notes = cur.tl.notes.filter(n => n.part === vp);
+    cur.fing = Fretboard.fingerings(notes, cur.strings, part.transpose === -12 ? 12 : 0);
+    cur.vNotes = notes;
+  }
+  function setupExtras() {
+    computeFing();
+    $('#fb-wrap').hidden = !cur.fbOn;
+    fb = cur.fbOn ? Fretboard.create($('#fb-wrap'), cur.strings) : null;
+    engine.drums = cur.drumStyle ? Drums.make(cur.tl, cur.drumStyle, { fills: cur.drumFills }) : null;
+  }
+  function restartIfPlaying(fn) {
+    const was = engine.playing;
+    if (was) engine.pause();
+    fn();
+    if (was) { const ci = engine.countIn; engine.countIn = false; engine.play(); engine.countIn = ci; }
+  }
+  $('#drum-style').innerHTML = '<option value="">Desligada</option>' + Object.entries(Drums.STYLES).map(([k, v]) => `<option value="${k}">${v.name}</option>`).join('');
+  $('#drum-style').addEventListener('change', e => restartIfPlaying(() => { cur.drumStyle = e.target.value; engine.drums = cur.drumStyle ? Drums.make(cur.tl, cur.drumStyle, { fills: cur.drumFills }) : null; save(); }));
+  $('#drum-fills').addEventListener('change', e => restartIfPlaying(() => { cur.drumFills = e.target.checked; if (cur.drumStyle) engine.drums = Drums.make(cur.tl, cur.drumStyle, { fills: cur.drumFills }); save(); }));
+  $('#drum-vol').addEventListener('input', e => { engine.vol.drums = e.target.value / 100; engine.applyMix(); save(); });
+  $('#bass-tone').addEventListener('change', e => { engine.bassTone = e.target.value; save(); });
+  $('#fb-on').addEventListener('change', e => { cur.fbOn = e.target.checked; setupExtras(); updateNow(true); save(); });
+  $('#fb-strings').addEventListener('change', e => { cur.strings = +e.target.value; setupExtras(); updateNow(true); save(); });
+
   $('#swing').addEventListener('change', e => { cur.swing = +e.target.value; rebuildTimeline(); });
   $('#expr-on').addEventListener('change', e => { cur.expressive = e.target.checked; rebuildTimeline(); });
   const readRamp = () => {
@@ -3137,7 +3493,7 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
   });
   $('#voice-range').addEventListener('change', e => { engine.voice.range = e.target.value; save(); });
   $('#voice-vol').addEventListener('input', e => { engine.voice.vol = e.target.value / 100; engine.applyMix(); save(); });
-  $('#voice-part').addEventListener('change', e => { engine.voice.part = +e.target.value; save(); });
+  $('#voice-part').addEventListener('change', e => { engine.voice.part = +e.target.value; computeFing(); updateNow(true); save(); });
   $('#metro-on').addEventListener('change', e => { engine.metronome = e.target.checked; save(); });
   $('#countin-on').addEventListener('change', e => { engine.countIn = e.target.checked; save(); });
   $('#click-vol').addEventListener('input', e => { engine.vol.click = e.target.value / 100; engine.applyMix(); save(); });
@@ -3231,6 +3587,12 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
     if (!counting) for (const n of tl.notes) { if (n.t > pos + 0.01) break; if (n.t + n.d > pos + 0.01) on.push(n); }
     const sung = on.filter(n => n.part === vp);
     $('#now-note').textContent = sung.length ? sung.map(n => (SOL[n.step] || '') + (ACC[n.alter || 0] || '')).join(' ') : (engine.playing ? '' : '—');
+    if (fb && cur.fing) {
+      const curN = sung.length ? sung[sung.length - 1] : null;
+      let nextN = null;
+      for (const n of cur.vNotes) { if (n.t > pos + 0.02 && (!curN || n.t > curN.t + 0.001)) { nextN = n; break; } }
+      fb.show(curN ? cur.fing.get(curN) : null, nextN ? cur.fing.get(nextN) : null, curN ? (SOL[curN.step] || '') + (ACC[curN.alter || 0] || '') : '');
+    }
     // cifra
     let c = null, nx = null;
     for (const ch of tl.chords) { if (ch.t <= pos + 0.02) c = ch; else if (!nx && (!c || ch.text !== c.text)) { nx = ch; break; } }

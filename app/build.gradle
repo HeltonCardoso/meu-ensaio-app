@@ -1,0 +1,51 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.meuensaio.app'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'com.meuensaio.app'
+        minSdk 26
+        targetSdk 34
+        // o GitHub Actions aumenta o número a cada compilação
+        versionCode (System.getenv('GITHUB_RUN_NUMBER') ?: '1').toInteger()
+        versionName '1.' + (System.getenv('GITHUB_RUN_NUMBER') ?: '0')
+    }
+
+    signingConfigs {
+        // chave fixa: assim as atualizações instalam por cima sem apagar as partituras
+        fixa {
+            storeFile file('meuensaio.jks')
+            storePassword 'meuensaio123'
+            keyAlias 'meuensaio'
+            keyPassword 'meuensaio123'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.fixa
+        }
+        debug {
+            signingConfig signingConfigs.fixa
+        }
+    }
+
+    lint {
+        checkReleaseBuilds false
+        abortOnError false
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation 'androidx.webkit:webkit:1.11.0'
+}

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Clave de Fá estilizada (área segura 108dp, desenho no centro) -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#00000000" android:strokeColor="#F2B544" android:strokeWidth="5.5"
+        android:strokeLineCap="round"
+        android:pathData="M38,48 C36,32 66,30 66,48 C66,64 52,76 36,82" />
+    <path android:fillColor="#F2B544" android:pathData="M40,48 m-6,0 a6,6 0 1,0 12,0 a6,6 0 1,0 -12,0" />
+    <path android:fillColor="#F2B544" android:pathData="M74,42 m-3.5,0 a3.5,3.5 0 1,0 7,0 a3.5,3.5 0 1,0 -7,0" />
+    <path android:fillColor="#F2B544" android:pathData="M74,56 m-3.5,0 a3.5,3.5 0 1,0 7,0 a3.5,3.5 0 1,0 -7,0" />
+</vector>

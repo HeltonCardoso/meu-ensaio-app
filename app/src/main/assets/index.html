@@ -151,6 +151,11 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
         <div class="row between"><b>Andamento</b><span><span id="bpm-label">100</span> bpm</span></div>
         <input type="range" id="bpm" min="30" max="200" step="1" value="100">
         <div class="row"><button class="chip" id="bpm-orig">Da partitura (<span id="bpm-orig-v">100</span>)</button><button class="chip" data-pct="50">50%</button><button class="chip" data-pct="75">75%</button><button class="chip" data-pct="90">90%</button></div>
+        <div class="row between"><span><b>Swing</b> <span class="muted small">(colcheias balançadas)</span></span>
+          <select id="swing"><option value="0">Reto (como escrito)</option><option value="0.58">Leve</option><option value="0.62">Médio</option><option value="0.67">Jazz (tercina)</option></select></div>
+        <p class="muted small" id="swing-hint" hidden></p>
+        <label class="switch"><input type="checkbox" id="expr-on" checked><span></span> Respeitar rit. e fermata</label>
+        <p class="muted small" id="expr-hint" hidden></p>
       </div>
 
       <div class="group">
@@ -188,6 +193,13 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
           <label>até <input type="number" id="loop-to" min="0" inputmode="numeric"></label>
         </div>
         <div class="row"><button class="chip" id="loop-from-here">Início = atual</button><button class="chip" id="loop-to-here">Fim = atual</button></div>
+        <label class="switch"><input type="checkbox" id="ramp-on"><span></span> <b>Acelerar a cada volta</b></label>
+        <div class="row loop-row" id="ramp-row">
+          <label>começa em <input type="number" id="ramp-start" min="30" max="150" value="60" inputmode="numeric">%</label>
+          <label>sobe <input type="number" id="ramp-step" min="1" max="30" value="5" inputmode="numeric">%</label>
+          <label>até <input type="number" id="ramp-target" min="30" max="200" value="100" inputmode="numeric">%</label>
+        </div>
+        <p class="muted small">Toque ▶ no início do trecho: cada repetição fica um pouco mais rápida até chegar no andamento final.</p>
         <p class="muted small">Dica: toque num compasso da partitura para começar dali.</p>
       </div>
 
@@ -454,6 +466,8 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
                 else if (/^D\.?\s?S\.?(\s|$)|dal\s*segno/i.test(s)) M.dalsegno = true;
                 else if (/^to\s*coda|^ao\s*coda|^para\s*(a\s*)?coda/i.test(s)) M.tocoda = true;
                 else if (/^fine$/i.test(s)) M.fine = true;
+                else if (/^(rit|ritard|rall)/i.test(s)) M.rit = true;
+                else if (/^a\s*tempo/i.test(s)) M.atempo = true;
                 else if (/^coda$/i.test(s)) M.coda = true;
                 else {
                   const ch = parseChordText(s);
@@ -503,7 +517,8 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
               let accent = 1;
               if (nt) { const art = kid(nt, 'articulations'); if (art && (kid(art, 'accent') || kid(art, 'strong-accent'))) accent = 1.3; }
               const staccato = nt && kid(kid(nt, 'articulations'), 'staccato') ? true : false;
-              M.notes.push({ part: pIdx, offQ: start, durQ: dur, midi: Math.round(midi), step, alter: num(p, 'alter', 0), tieStart, tieStop, voice: txt(el, 'voice', '1'), staff: txt(el, 'staff', '1'), vel: accent, staccato });
+              const fermata = !!(nt && kid(nt, 'fermata'));
+              M.notes.push({ part: pIdx, offQ: start, durQ: dur, midi: Math.round(midi), step, alter: num(p, 'alter', 0), tieStart, tieStop, voice: txt(el, 'voice', '1'), staff: txt(el, 'staff', '1'), vel: accent, staccato, fermata });
               part.notes++;
             }
             // tempo dentro de <note><sound>? raro; ignorado
@@ -598,26 +613,39 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
     const openTies = new Map(); // part:midi -> nota
     let lastChord = null;
     let defaultBpm = opts.defaultBpm || 100;
+    // swing: r = fração da 1ª colcheia do tempo (0.5 = reto, 0.667 = tercina)
+    const r = opts.swing && opts.swing > 0.5 ? Math.min(0.75, opts.swing) : 0;
+    const expressive = opts.expressive !== false;
+    const fermatas = [];   // {q0, q1}
+    const ritStarts = [];  // índices em markers
+    const swingOf = (M, off) => {
+      if (!r || !M.timeSig || M.timeSig[1] !== 4) return off;
+      const b = Math.floor(off + 1e-9), f = off - b;
+      return b + (f < 0.5 ? f * 2 * r : r + (f - 0.5) * 2 * (1 - r));
+    };
 
     order.forEach((mIdx, k) => {
       const M = score.measures[mIdx];
-      markers.push({ q, mIdx, number: M.number, lenQ: M.lenQ, timeSig: M.timeSig, k });
+      markers.push({ q, mIdx, number: M.number, lenQ: M.lenQ, timeSig: M.timeSig, k, rit: !!M.rit, atempo: !!M.atempo });
       // andamento: <sound tempo> tem prioridade sobre <metronome>
       const strong = M.tempos.filter(t => !t.weak), weak = M.tempos.filter(t => t.weak);
       (strong.length ? strong : weak).forEach(t => tempoPts.push({ q: q + t.offQ, bpm: t.bpm }));
       const sorted = M.notes.slice().sort((a, b) => a.offQ - b.offQ);
       for (const nt of sorted) {
         const key = nt.part + ':' + nt.midi;
-        const at = q + nt.offQ;
+        const wOn = swingOf(M, nt.offQ), wOff = swingOf(M, nt.offQ + nt.durQ);
+        const at = q + wOn;
+        const wDur = Math.max(0.05, wOff - wOn);
+        if (nt.fermata && expressive) fermatas.push({ q0: at, q1: at + wDur });
         if (nt.tieStop && openTies.has(key)) {
           const prev = openTies.get(key);
           if (Math.abs(prev.q + prev.durQ - at) < 0.02) {
-            prev.durQ += nt.durQ;
+            prev.durQ += wDur;
             if (!nt.tieStart) openTies.delete(key);
             continue;
           }
         }
-        const ev = { q: at, durQ: nt.durQ, midi: nt.midi, part: nt.part, mIdx, offQ: nt.offQ, vel: nt.vel, staccato: nt.staccato, step: nt.step, alter: nt.alter, src: nt.src, k };
+        const ev = { q: at, durQ: wDur, midi: nt.midi, part: nt.part, mIdx, offQ: nt.offQ, vel: nt.vel, staccato: nt.staccato, step: nt.step, alter: nt.alter, src: nt.src, k };
         notes.push(ev);
         if (nt.tieStart) openTies.set(key, ev); else openTies.delete(key);
       }
@@ -626,7 +654,7 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
       if ((!hs.length || hs[0].offQ > 0.001) && lastChord) chords.push(Object.assign({}, lastChord, { q, durQ: (hs.length ? hs[0].offQ : M.lenQ), carried: true, mIdx }));
       hs.forEach((h, j) => {
         const end = j + 1 < hs.length ? hs[j + 1].offQ : M.lenQ;
-        const c = { q: q + h.offQ, durQ: Math.max(0.25, end - h.offQ), root: h.root, intervals: h.intervals, bass: h.bass, text: h.text, mIdx };
+        const c = { q: q + swingOf(M, h.offQ), durQ: Math.max(0.25, swingOf(M, end) - swingOf(M, h.offQ)), root: h.root, intervals: h.intervals, bass: h.bass, text: h.text, mIdx };
         chords.push(c);
         lastChord = c;
       });
@@ -637,13 +665,40 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
     // mapa de andamento
     tempoPts.sort((a, b) => a.q - b.q);
     if (!tempoPts.length || tempoPts[0].q > 0) tempoPts.unshift({ q: 0, bpm: tempoPts.length ? tempoPts[0].bpm : defaultBpm });
-    const segs = []; let sec = 0;
-    for (let j = 0; j < tempoPts.length; j++) {
-      const p = tempoPts[j];
-      if (segs.length) { const s = segs[segs.length - 1]; sec = s.sec + (p.q - s.q) * 60 / s.bpm; }
-      if (segs.length && Math.abs(segs[segs.length - 1].q - p.q) < 1e-9) segs[segs.length - 1].bpm = p.bpm;
-      else segs.push({ q: p.q, sec, bpm: p.bpm });
+    const baseBpmAt = qq => { let b = tempoPts[0].bpm; for (const p of tempoPts) { if (p.q <= qq + 1e-9) b = p.bpm; else break; } return b; };
+    // regiões expressivas: rit. (desacelera até 70% em até 4 compassos) e fermata (nota dura o dobro)
+    const regions = [];
+    if (expressive) {
+      markers.forEach((m, i) => {
+        if (!m.rit) return;
+        let j = i, endQ = m.q + m.lenQ;
+        while (j + 1 < markers.length && j - i < 3 && !markers[j + 1].atempo) { j++; endQ = markers[j].q + markers[j].lenQ; }
+        regions.push({ q0: m.q, q1: endQ, f0: 1, f1: 0.7, ramp: true });
+      });
+      fermatas.forEach(f => regions.push({ q0: f.q0, q1: f.q1, f0: 0.5, f1: 0.5 }));
     }
+    const factorAt = qq => {
+      let f = 1;
+      for (const g of regions) {
+        if (qq >= g.q0 - 1e-9 && qq < g.q1 - 1e-9) f *= g.f0 + (g.f1 - g.f0) * ((qq - g.q0) / Math.max(1e-6, g.q1 - g.q0));
+        else if (g.ramp && qq >= g.q1 - 1e-9 && !(markers.find(m => Math.abs(m.q - g.q1) < 1e-6) || {}).atempo && g.q1 >= totalQ - 1e-6) f *= g.f1;
+      }
+      return f;
+    };
+    const cuts = new Set([0, totalQ]);
+    tempoPts.forEach(p => cuts.add(p.q));
+    regions.forEach(g => { cuts.add(g.q0); cuts.add(g.q1); if (g.ramp) for (let x = g.q0; x < g.q1; x += 0.25) cuts.add(x); });
+    const qs = [...cuts].filter(x => x >= 0 && x <= totalQ + 1e-9).sort((a, b) => a - b);
+    const segs = []; let sec = 0;
+    for (let j = 0; j < qs.length; j++) {
+      const a = qs[j], b = qs[j + 1] ?? a + 1;
+      const mid = (a + b) / 2;
+      const bpm = baseBpmAt(mid) * factorAt(mid);
+      if (segs.length) { const sg = segs[segs.length - 1]; sec = sg.sec + (a - sg.q) * 60 / sg.bpm; }
+      if (segs.length && Math.abs(segs[segs.length - 1].bpm - bpm) < 1e-6) continue;
+      segs.push({ q: a, sec, bpm });
+    }
+    if (!segs.length) segs.push({ q: 0, sec: 0, bpm: defaultBpm });
     function secAt(qq) {
       let s = segs[0];
       for (let j = 1; j < segs.length && segs[j].q <= qq; j++) s = segs[j];
@@ -678,7 +733,7 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
       }
     });
 
-    return { order, markers, notes, chords, beats, totalQ, totalSec: secAt(totalQ), secAt, qAt, bpmAt, baseBpm: segs[0].bpm };
+    return { order, markers, notes, chords, beats, totalQ, totalSec: secAt(totalQ), secAt, qAt, bpmAt, baseBpm: tempoPts[0].bpm, swing: r, hasRit: regions.some(g => g.ramp), hasFermata: fermatas.length > 0 };
   }
 
   const api = { parseMusicXML, buildTimeline, unroll, parseChordText };
@@ -1484,7 +1539,7 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
         let best = null, bd = Infinity;
         for (const s of staves) {
           if (g.x < s.x0 - 10 * s.sp || g.x > s.x1 + 2 * s.sp) continue;
-          const d = g.y <= s.top ? s.top - g.y : (g.y >= s.bottom ? (g.y - s.bottom) * 1.6 : 0);
+          const d = g.y <= s.top ? s.top - g.y : (g.y >= s.bottom ? (g.y - s.bottom) * 2.2 : 0);
           if (d < bd) { bd = d; best = s; }
         }
         if (best && bd < 12 * best.sp) best.text.push(g);
@@ -1522,10 +1577,11 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
       if (m && r.text.length < 40) { partName = r.text; break; }
     }
     // andamento: "q = 100", "♩ = 100", "= 100"
-    let bpm = null;
+    let bpm = null, styleText = '';
     for (const r of textRows) {
       const m = /=\s*(\d{2,3})\b/.exec(r.text);
       if (m) {
+        styleText = r.text.slice(0, m.index).replace(/[qhe♩♪.]\s*$/, '').trim();
         bpm = +m[1];
         const before = r.text.slice(0, m.index).trim();
         if (/h\s*$|𝅗𝅥\s*$|half/i.test(before)) bpm *= 2;
@@ -1572,7 +1628,7 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
     const measures = base.map((m, i) => ({
       index: i, number: String(m.numberGuess), lenQ: 0, timeSig: m.timeSig, notes: [], harmonies: m.harmonies, tempos: [],
       repeatForward: m.repeatForward, repeatBackward: m.repeatBackward, times: 2, endings: m.endings, endingGroup: null,
-      segno: m.segno, coda: m.coda, dacapo: m.dacapo, dalsegno: m.dalsegno, tocoda: m.tocoda, fine: m.fine,
+      segno: m.segno, coda: m.coda, dacapo: m.dacapo, dalsegno: m.dalsegno, tocoda: m.tocoda, fine: m.fine, rit: m.rit, atempo: m.atempo,
       src: m.src, _nominal: m.timeSig[0] * 4 / m.timeSig[1],
     }));
     partMeasures.forEach((pm, pi) => pm.forEach((m, i) => {
@@ -1598,7 +1654,7 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
     const harmCount = measures.reduce((a, m) => a + m.harmonies.length, 0);
     return {
       title: (pdf.title && pdf.title.trim()) || titleGuess, composer: '', parts, measures,
-      harmonySource: harmCount ? 'text' : null, warnings, pages: pdf.pages.length,
+      harmonySource: harmCount ? 'text' : null, warnings, pages: pdf.pages.length, styleText,
     };
   }
 
@@ -1905,7 +1961,7 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
               measAcc.set(d, alter);
             } else alter = measAcc.has(d) ? measAcc.get(d) : keyAlter(step);
             const midi = (oct + 1) * 12 + STEP_PC[step] + alter;
-            out.push({ offQ: on, durQ: e.dur, midi, step: STEP_NAMES[step], alter, tieStart: false, tieStop: false, vel: 1, staccato: false, voice: voice2 ? '2' : '1',
+            out.push({ offQ: on, durQ: e.dur, midi, step: STEP_NAMES[step], alter, tieStart: false, tieStop: false, vel: 1, staccato: false, fermata: !!e.fermata, voice: voice2 ? '2' : '1',
               src: { page: st.page, x: h.x, y: h.y, w: h.w, sp }, _h: h });
             h.note = out[out.length - 1];
           }
@@ -1920,7 +1976,7 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
           for (const h of e2.heads) {
             const d = baseD + h.pos; const step = ((d % 7) + 7) % 7, oct = Math.floor(d / 7);
             const alter = h.accs && h.accs.length ? (h.accs[0].kind === 'acc-flat' ? -1 : h.accs[0].kind === 'acc-sharp' ? 1 : 0) : (measAcc.has(d) ? measAcc.get(d) : keyAlter(step));
-            out.push({ offQ: on, durQ: e2.dur, midi: (oct + 1) * 12 + STEP_PC[step] + alter, step: STEP_NAMES[step], alter, tieStart: false, tieStop: false, vel: 1, staccato: false, voice: '1', src: { page: st.page, x: h.x, y: h.y, w: h.w, sp }, _h: h });
+            out.push({ offQ: on, durQ: e2.dur, midi: (oct + 1) * 12 + STEP_PC[step] + alter, step: STEP_NAMES[step], alter, tieStart: false, tieStop: false, vel: 1, staccato: false, fermata: !!e2.fermata, voice: '1', src: { page: st.page, x: h.x, y: h.y, w: h.w, sp }, _h: h });
             h.note = out[out.length - 1];
           }
         }
@@ -1973,7 +2029,7 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
         }
       }
       // palavras de navegação
-      const flagsW = { segno: false, coda: false, dacapo: false, dalsegno: false, tocoda: false, fine: false };
+      const flagsW = { segno: false, coda: false, dacapo: false, dalsegno: false, tocoda: false, fine: false, rit: false, atempo: false };
       for (const w of merged) {
         if (w.x < bd.x0 - 0.5 * sp || w.x >= bd.x1) continue;
         const s = w.text;
@@ -1981,6 +2037,8 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
         else if (/^D\.?\s?S\.?|dal\s*segno/i.test(s)) flagsW.dalsegno = true;
         else if (/^(to|ao|para\s*a?)\s*coda/i.test(s)) flagsW.tocoda = true;
         else if (/^fine$/i.test(s)) flagsW.fine = true;
+        else if (/^(rit|ritard|rall)/i.test(s)) flagsW.rit = true;
+        else if (/^a\s*tempo/i.test(s)) flagsW.atempo = true;
       }
       for (const g of st.music) {
         if (g.x < bd.x0 - sp || g.x >= bd.x1) continue;
@@ -2250,6 +2308,8 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
       this.playing = false;
       this.speed = 1;             // multiplicador de andamento
       this.loop = null;           // {startSec, endSec}
+      this.ramp = { on: false, start: 0.6, step: 0.05, target: 1 }; // acelerar a cada volta
+      this.lap = 0;
       this.metronome = false;
       this.countIn = true;
       this.chordsOn = true;
@@ -2287,6 +2347,16 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
       this.voiceBus = c.createGain(); this.voiceBus.gain.value = this.voice.vol;
       this.voiceBus.connect(this.master); this.voiceBus.connect(this.rev);
       this.partBuses = [];
+    }
+
+    // troca a linha do tempo (ex.: ligou o swing) mantendo o ponto da música
+    replaceTimeline(tl) {
+      const was = this.playing;
+      if (was) this.pause();
+      const q = this.tl ? this.tl.qAt(this.pos) : 0;
+      this.tl = tl;
+      this.pos = Math.max(0, Math.min(tl.totalSec, tl.secAt(q)));
+      if (was) { const ci = this.countIn; this.countIn = false; this.play(); this.countIn = ci; }
     }
 
     setTimeline(tl, parts) {
@@ -2409,12 +2479,18 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
       if (!this.playing) return this.pos;
       const now = this.ctx.currentTime;
       if (now < this._t0) return this._startPos; // contagem
-      let p = this._startPos + (now - this._t0) * this.speed;
-      if (this.loop && p >= this.loop.endSec) {
-        const L = this.loop.endSec - this.loop.startSec;
-        p = this.loop.startSec + ((p - this.loop.endSec) % L);
-      }
+      let sg = this._segs[0];
+      for (const x of this._segs) if (x.audio0 <= now) sg = x;
+      let p = sg.score0 + (now - sg.audio0) * sg.speed;
+      if (this.loop && p >= this.loop.endSec) p = this.loop.endSec - 0.001;
       return Math.min(p, this.duration);
+    }
+    // velocidade que está soando agora (muda a cada volta quando "acelerar" está ligado)
+    currentSpeed() {
+      if (!this.playing || !this._segs) return this.speed;
+      const now = this.ctx.currentTime; let sg = this._segs[0];
+      for (const x of this._segs) if (x.audio0 <= now) sg = x;
+      return sg.speed;
     }
     isCountingIn() { return this.playing && this.ctx.currentTime < this._t0; }
 
@@ -2442,6 +2518,7 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
       this._cursor = { notes: this._idx(this.tl.notes, this.pos), chords: this._idx(this.tl.chords, this.pos), beats: this._idx(this.tl.beats, this.pos) };
       this._cycleBase = this._t0 - this._startPos / this.speed; // tempo de áudio do segundo 0 da partitura
       this._schedUntil = this._startPos;
+      this._segs = [{ audio0: this._t0, score0: this._startPos, speed: this.speed }];
       this.playing = true;
       // cifra que já estava soando no ponto de partida
       const prev = this.tl.chords.filter(c => c.t < this.pos - 0.001 && c.t + c.d > this.pos + 0.05).pop();
@@ -2485,7 +2562,15 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
             // próxima volta do loop
             const L = this.loop.endSec - this.loop.startSec;
             if (L <= 0.05) { this.pause(); return; }
-            this._cycleBase += (this.loop.endSec - this.loop.startSec) / this.speed;
+            const wrapAudio = this._cycleBase + this.loop.endSec / this.speed;
+            this.lap = (this.lap || 0) + 1;
+            if (this.ramp && this.ramp.on && this.speed < this.ramp.target - 1e-6) {
+              this.speed = Math.min(this.ramp.target, this.speed + this.ramp.step);
+            }
+            this._cycleBase = wrapAudio - this.loop.startSec / this.speed;
+            this._segs.push({ audio0: wrapAudio, score0: this.loop.startSec, speed: this.speed });
+            if (this._segs.length > 4) this._segs.shift();
+            if (this.onLap) { const lap = this.lap, sp = this.speed; setTimeout(() => this.onLap(lap, sp), Math.max(0, (wrapAudio - ctx.currentTime) * 1000)); }
             this._schedUntil = this.loop.startSec;
             this._cursor = { notes: this._idx(tl.notes, this.loop.startSec), chords: this._idx(tl.chords, this.loop.startSec), beats: this._idx(tl.beats, this.loop.startSec) };
             const prev = tl.chords.filter(c => c.t < this.loop.startSec - 0.001 && c.t + c.d > this.loop.startSec + 0.05).pop();
@@ -2898,7 +2983,8 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
     rec.opened = Date.now(); Store.put(rec);
     const score = r.score;
     if (!r.pdf) score.measures.forEach(m => m.notes.forEach(n => { if (!n.src) n.src = {}; }));
-    const tl = MusicXML.buildTimeline(score);
+    const set0 = rec.settings || {};
+    const tl = MusicXML.buildTimeline(score, { swing: +set0.swing || 0, expressive: set0.expressive ?? true });
     // ligações para destaque: nota da linha do tempo -> elemento
     cur = { rec, score, tl, pdf: r.pdf, noteEls: null, lastOn: [], lastMeasure: -1 };
     $('#view-library').hidden = true; $('#view-player').hidden = false; $('#panel').hidden = true;
@@ -2921,6 +3007,8 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
     engine.vol.click = set.clickVol ?? 0.7;
     Object.assign(engine.voice, { on: set.voiceOn ?? true, mode: set.voiceMode || 'sing', vol: set.voiceVol ?? 0.85, range: set.voiceRange || 'media', part: Math.min(set.voicePart ?? defaultVoicePart(score), score.parts.length - 1) });
     engine.loop = null;
+    cur.swing = +set.swing || 0; cur.expressive = set.expressive ?? true;
+    Object.assign(engine.ramp, { on: !!set.rampOn, start: (set.rampStart || 60) / 100, step: (set.rampStep || 5) / 100, target: (set.rampTarget || 100) / 100 });
     syncPanel(set);
     if (set.loop && set.loop.on) applyLoop(true);
     $('#t-tot').textContent = fmtTime(tl.totalSec / engine.speed);
@@ -2933,7 +3021,7 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
     cur.noteEls = cur.pdf ? renderPDF(cur.pdf, cur.score, cur.tl) : renderXmlView(cur.score);
     cur.lastOn = []; cur.lastMeasure = -1;
   }
-  function closePlayer() { engine.stop(); cur = null; $('#view-player').hidden = true; $('#view-library').hidden = false; renderList(); }
+  function closePlayer() { flushSave(); engine.stop(); cur = null; $('#view-player').hidden = true; $('#view-library').hidden = false; renderList(); }
   $('#btn-back').addEventListener('click', closePlayer);
 
   let saveT = null;
@@ -2946,9 +3034,14 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
       voiceOn: engine.voice.on, voiceMode: engine.voice.mode, voiceVol: engine.voice.vol, voiceRange: engine.voice.range, voicePart: engine.voice.part,
       parts: engine.parts.map(p => ({ vol: p.vol, mute: p.mute, octave: p.octave })),
       loop: { on: $('#loop-on').checked, from: $('#loop-from').value, to: $('#loop-to').value },
+      swing: cur.swing, expressive: cur.expressive,
+      rampOn: engine.ramp.on, rampStart: Math.round(engine.ramp.start * 100), rampStep: Math.round(engine.ramp.step * 100), rampTarget: Math.round(engine.ramp.target * 100),
     };
-    clearTimeout(saveT); saveT = setTimeout(() => Store.put(rec), 500);
+    clearTimeout(saveT); saveT = setTimeout(() => { saveT = null; Store.put(rec); }, 500);
   }
+  function flushSave() { if (saveT && cur) { clearTimeout(saveT); saveT = null; Store.put(cur.rec); } }
+  window.addEventListener('pagehide', flushSave);
+  document.addEventListener('visibilitychange', () => { if (document.hidden) flushSave(); });
 
   function syncPanel(set) {
     set = set || {};
@@ -2968,6 +3061,16 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
     $('#loop-to').value = (set.loop && set.loop.to) || ms[ms.length - 1].number;
     $('#loop-on').checked = !!(set.loop && set.loop.on);
     $('#btn-loop').classList.toggle('on', $('#loop-on').checked);
+    $('#swing').value = String(cur.swing || 0);
+    if (!$('#swing').value) $('#swing').value = '0';
+    const st = cur.score.styleText || '';
+    $('#swing-hint').hidden = !/swing|jazz|shuffle|blues|bossa/i.test(st);
+    $('#swing-hint').textContent = 'A partitura indica “' + st + '”. Se a banda toca balançado, experimente o swing.';
+    $('#expr-on').checked = cur.expressive;
+    const ex = [cur.tl.hasRit || cur.score.measures.some(m => m.rit) ? 'rit. no compasso ' + cur.score.measures.filter(m => m.rit).map(m => m.number).join(', ') : '', cur.score.measures.some(m => m.notes.some(n => n.fermata)) ? 'fermata no compasso ' + cur.score.measures.filter(m => m.notes.some(n => n.fermata)).map(m => m.number).join(', ') : ''].filter(Boolean);
+    $('#expr-hint').hidden = !ex.length; $('#expr-hint').textContent = 'Encontrei: ' + ex.join(' e ') + '.';
+    $('#ramp-on').checked = engine.ramp.on;
+    $('#ramp-start').value = Math.round(engine.ramp.start * 100); $('#ramp-step').value = Math.round(engine.ramp.step * 100); $('#ramp-target').value = Math.round(engine.ramp.target * 100);
     $('#parts').innerHTML = engine.parts.map((p, i) => `<div class="part" data-i="${i}">
       <label class="switch"><input type="checkbox" data-k="on" ${p.mute ? '' : 'checked'}><span></span> Tocar ${esc(p.name)}</label>
       <div class="pctl"><input type="range" min="0" max="100" value="${Math.round(p.vol * 100)}" data-k="vol" aria-label="Volume">
@@ -2994,6 +3097,37 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
   $$('[data-pct]').forEach(b => b.addEventListener('click', () => setBpm(cur.baseBpm * b.dataset.pct / 100)));
   $('#btn-slower').addEventListener('click', () => { setBpm(engine.speed * cur.tl.baseBpm - 5); toast(Math.round(engine.speed * cur.tl.baseBpm) + ' bpm', 900); });
   $('#btn-faster').addEventListener('click', () => { setBpm(engine.speed * cur.tl.baseBpm + 5); toast(Math.round(engine.speed * cur.tl.baseBpm) + ' bpm', 900); });
+
+  function rebuildTimeline() {
+    const tl = MusicXML.buildTimeline(cur.score, { swing: cur.swing, expressive: cur.expressive });
+    cur.tl = tl;
+    engine.replaceTimeline(tl);
+    if ($('#loop-on').checked) applyLoop(true);
+    $('#t-tot').textContent = fmtTime(tl.totalSec / engine.speed);
+    updateNow(true); save();
+  }
+  $('#swing').addEventListener('change', e => { cur.swing = +e.target.value; rebuildTimeline(); });
+  $('#expr-on').addEventListener('change', e => { cur.expressive = e.target.checked; rebuildTimeline(); });
+  const readRamp = () => {
+    const c = (v, lo, hi, d) => { v = parseInt(v, 10); return isNaN(v) ? d : Math.max(lo, Math.min(hi, v)); };
+    engine.ramp.start = c($('#ramp-start').value, 30, 150, 60) / 100;
+    engine.ramp.step = c($('#ramp-step').value, 1, 30, 5) / 100;
+    engine.ramp.target = c($('#ramp-target').value, 30, 200, 100) / 100;
+    if (engine.ramp.target < engine.ramp.start) engine.ramp.target = engine.ramp.start;
+  };
+  $('#ramp-on').addEventListener('change', e => {
+    engine.ramp.on = e.target.checked; readRamp();
+    if (e.target.checked && !$('#loop-on').checked) { $('#loop-on').checked = true; applyLoop(); toast('Repetir trecho ligado: escolha os compassos acima.', 3000); }
+    save();
+  });
+  ['#ramp-start', '#ramp-step', '#ramp-target'].forEach(sel => $(sel).addEventListener('change', () => { readRamp(); save(); }));
+  engine.onLap = (lap, sp) => {
+    if (!cur) return;
+    const bpm = Math.round(sp * cur.tl.baseBpm);
+    $('#bpm').value = bpm; $('#bpm-label').textContent = bpm;
+    if (engine.ramp.on) toast(`Volta ${lap + 1} · ${bpm} bpm (${Math.round(sp * 100)}%)` + (sp >= engine.ramp.target - 1e-6 ? ' — andamento final' : ''), 1800);
+    save();
+  };
 
   $('#voice-on').addEventListener('change', e => { engine.voice.on = e.target.checked; save(); });
   $('#voice-mode').addEventListener('change', e => {
@@ -3038,7 +3172,18 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
   function updatePlay() { $('#btn-play').textContent = engine.playing ? '❚❚' : '▶'; }
   $('#btn-play').addEventListener('click', async () => {
     if (!cur) return;
-    try { if (engine.playing) engine.pause(); else await engine.play(); } catch (e) { toast('Não consegui ligar o som: ' + e.message, 4000); }
+    try {
+      if (engine.playing) engine.pause();
+      else {
+        if (engine.ramp.on && engine.loop && Math.abs(engine.pos - engine.loop.startSec) < 0.05) {
+          readRamp(); engine.speed = engine.ramp.start; engine.lap = 0;
+          const bpm = Math.round(engine.speed * cur.tl.baseBpm);
+          $('#bpm').value = bpm; $('#bpm-label').textContent = bpm;
+          toast(`Volta 1 · ${bpm} bpm (${Math.round(engine.speed * 100)}%)`, 1800);
+        }
+        await engine.play();
+      }
+    } catch (e) { toast('Não consegui ligar o som: ' + e.message, 4000); }
     updatePlay();
   });
   $('#btn-start').addEventListener('click', () => { engine.seek(engine.loop ? engine.loop.startSec : 0); updateNow(true); });

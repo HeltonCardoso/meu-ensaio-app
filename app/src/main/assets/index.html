@@ -179,8 +179,10 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
       <div class="group" id="parts-group">
         <b>Instrumento</b>
         <div id="parts"></div>
-        <div class="row between"><span class="muted">Timbre do baixo</span>
+        <div class="row between" id="bass-tone-row"><span class="muted">Timbre do baixo</span>
           <select id="bass-tone"><option value="dedo">Dedo (padrão)</option><option value="palheta">Palheta</option><option value="slap">Slap</option><option value="fretless">Fretless</option><option value="abafado">Abafado (palm mute)</option><option value="acustico">Acústico (rabecão)</option><option value="synth">Synth bass</option></select></div>
+        <label class="switch"><input type="checkbox" id="bass-boost" checked><span></span> Realçar o baixo no alto-falante do celular</label>
+        <p class="muted small">O alto-falante do celular quase não toca as notas graves do baixo. O realce acrescenta harmônicos para você ouvir melhor. Com fone ou caixa de som, pode desligar.</p>
         <label class="switch"><input type="checkbox" id="fb-on"><span></span> Mostrar o braço do baixo (corda e casa)</label>
         <div class="row between"><span class="muted">Cordas</span><select id="fb-strings"><option value="4">4 cordas</option><option value="5">5 cordas (Si grave)</option><option value="6">6 cordas</option></select></div>
       </div>
@@ -2541,6 +2543,25 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
 
   const mtof = m => 440 * Math.pow(2, (m - 69) / 12);
 
+  // a,d,s,r = envelope; osc = osciladores (m = multiplicador de frequência); f0/f1 = filtro (x f se < 30, senão Hz)
+  const INSTRUMENTS = {
+    piano:    { name: 'Piano', pluck: true, maxLen: 4, gain: 0.32, a: 0.004, d: 1.6, s: 0.12, r: 0.25, f0: 22, f1: 6, ft1: 0.8,
+                osc: [{ wave: 'triangle', g: 0.7 }, { wave: 'sine', m: 2, g: 0.25, decay: 0.5 }, { wave: 'sawtooth', g: 0.12, det: 4, decay: 0.3 }], noise: [0.06, 2500, 0.02] },
+    epiano:   { name: 'Piano elétrico', pluck: true, maxLen: 4, gain: 0.3, a: 0.005, d: 1.4, s: 0.25, r: 0.3, f0: 10, osc: [{ wave: 'sine', g: 0.9 }, { wave: 'sine', m: 4, g: 0.25, decay: 0.25 }, { wave: 'triangle', m: 2, g: 0.08 }] },
+    orgao:    { name: 'Órgão', gain: 0.22, a: 0.015, d: 0.05, s: 1, r: 0.08, f0: 4500, vib: [6.5, 0.003, 0], osc: [{ wave: 'organ', g: 0.9 }, { wave: 'sine', m: 0.5, g: 0.35 }] },
+    violao:   { name: 'Violão (nylon)', pluck: true, maxLen: 3, gain: 0.38, a: 0.003, d: 1.1, s: 0.08, r: 0.15, f0: 14, f1: 4, ft1: 0.5, osc: [{ wave: 'pluck', g: 0.9 }, { wave: 'sine', g: 0.3 }], noise: [0.1, 3000, 0.015] },
+    guitarra: { name: 'Guitarra (limpa)', pluck: true, maxLen: 3, gain: 0.26, a: 0.003, d: 1.3, s: 0.2, r: 0.15, f0: 18, f1: 7, ft1: 0.4, fq: 1.5, osc: [{ wave: 'sawtooth', g: 0.5 }, { wave: 'sawtooth', g: 0.4, det: 9 }, { wave: 'square', m: 0.5, g: 0.1 }] },
+    cordas:   { name: 'Cordas (orquestra)', gain: 0.2, a: 0.18, d: 0.3, s: 0.85, r: 0.35, f0: 2600, fq: 0.5, vib: [5.2, 0.004, 0.25], osc: [{ wave: 'sawtooth', g: 0.4, det: -9 }, { wave: 'sawtooth', g: 0.4, det: 8 }, { wave: 'sawtooth', g: 0.3, m: 2, det: 3 }] },
+    violino:  { name: 'Violino', gain: 0.22, a: 0.08, d: 0.2, s: 0.85, r: 0.18, f0: 3200, fq: 1.2, vib: [5.8, 0.006, 0.18], osc: [{ wave: 'sawtooth', g: 0.7 }, { wave: 'sawtooth', g: 0.25, det: 6 }], noise: [0.04, 4000, 0.06] },
+    flauta:   { name: 'Flauta', gain: 0.32, a: 0.05, d: 0.15, s: 0.8, r: 0.12, f0: 6, vib: [5, 0.005, 0.2], osc: [{ wave: 'sine', g: 0.9 }, { wave: 'triangle', m: 2, g: 0.12 }], noise: [0.12, 2, 0.12] },
+    clarinete:{ name: 'Clarinete', gain: 0.24, a: 0.04, d: 0.15, s: 0.85, r: 0.1, f0: 7, fq: 1, vib: [4.5, 0.002, 0.3], osc: [{ wave: 'square', g: 0.7 }, { wave: 'sine', g: 0.3 }] },
+    sax:      { name: 'Sax', gain: 0.24, a: 0.03, d: 0.2, s: 0.8, r: 0.1, f0: 3, f1: 9, ft1: 0.08, fq: 2.5, vib: [5.2, 0.006, 0.25], osc: [{ wave: 'sawtooth', g: 0.7 }, { wave: 'square', g: 0.2 }], noise: [0.08, 2500, 0.08] },
+    trompete: { name: 'Trompete', gain: 0.22, a: 0.025, d: 0.15, s: 0.8, r: 0.08, f0: 2, f1: 12, ft1: 0.06, fq: 1.8, vib: [5.5, 0.004, 0.3], osc: [{ wave: 'sawtooth', g: 0.8 }, { wave: 'sawtooth', g: 0.3, det: 5 }] },
+    trombone: { name: 'Trombone', gain: 0.24, a: 0.04, d: 0.2, s: 0.85, r: 0.12, f0: 2, f1: 7, ft1: 0.1, fq: 1.2, vib: [5, 0.003, 0.35], osc: [{ wave: 'sawtooth', g: 0.8 }, { wave: 'sine', g: 0.3 }] },
+    synth:    { name: 'Synth', gain: 0.2, a: 0.01, d: 0.2, s: 0.7, r: 0.1, f0: 9, fq: 3, osc: [{ wave: 'square', g: 0.5, det: -7 }, { wave: 'square', g: 0.5, det: 7 }] },
+  };
+  global.INSTRUMENTS = INSTRUMENTS;
+
   class Engine {
     constructor() {
       this.ctx = null;
@@ -2551,6 +2572,7 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
       this.ramp = { on: false, start: 0.6, step: 0.05, target: 1 }; // acelerar a cada volta
       this.drums = null;          // eventos de bateria (Drums.make)
       this.bassTone = 'dedo';     // timbre do baixo
+      this.bassBoost = true;      // realce para alto-falante de celular
       this.lap = 0;
       this.metronome = false;
       this.countIn = true;
@@ -2657,7 +2679,7 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
       const g = c.createGain();
       let d = Math.max(0.05, dur);
       if (p.short) d = Math.min(d, 0.22);
-      const peak = 0.55 * vel, end = t + d, rel = p.rel;
+      const peak = 0.85 * vel, end = t + d, rel = p.rel;
       g.gain.setValueAtTime(0, t);
       g.gain.linearRampToValueAtTime(peak, t + p.att);
       g.gain.exponentialRampToValueAtTime(Math.max(0.0005, peak * p.sus), t + p.att + p.dec);
@@ -2668,10 +2690,88 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
       if (p.tri) mk('triangle', f, p.tri).connect(flt);
       flt.connect(g);
       if (p.sine) mk('sine', f, p.sine).connect(g);
+      // realce: harmônicos na faixa que o alto-falante do celular consegue tocar
+      if (this.bassBoost) {
+        const bp = c.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = Math.min(1400, Math.max(500, f * 6)); bp.Q.value = 0.6;
+        const ws = c.createWaveShaper(); ws.curve = this._driveCurve(); ws.oversample = '2x';
+        const pre = c.createGain(); pre.gain.value = 2.2;
+        const post = c.createGain(); post.gain.value = 0.32;
+        mk('sawtooth', f * 2, 0.5).connect(pre); pre.connect(ws); ws.connect(bp); bp.connect(post); post.connect(g);
+        nodes.push(bp, ws, pre, post);
+      }
       g.connect(dest);
       if (p.click) this._noiseHit(t, 0.025, p.clickF || 2500, p.click * vel, dest, 'bandpass', 1.5);
       nodes.forEach(n => { if (n.start) { n.start(t); n.stop(end + rel + 0.02); } });
       this._track(nodes.concat([flt, g]), end + rel);
+    }
+
+    _driveCurve() {
+      if (this._dc) return this._dc;
+      const n = 1024, cv = new Float32Array(n);
+      for (let i = 0; i < n; i++) { const x = i / (n - 1) * 2 - 1; cv[i] = Math.tanh(x * 2.5); }
+      return (this._dc = cv);
+    }
+
+    // ---------- outros instrumentos (síntese) ----------
+    _synth(name, t, dur, midi, dest, vel) {
+      const P = INSTRUMENTS[name] || INSTRUMENTS.piano;
+      const c = this.ctx, f = mtof(midi);
+      const nodes = [];
+      const out = c.createGain(); out.gain.value = 0;
+      let d = Math.max(0.06, dur);
+      if (P.pluck) d = Math.min(d, P.maxLen || 3);
+      const end = t + d, rel = P.r;
+      // envelope
+      const pk = (P.gain || 0.3) * vel;
+      out.gain.setValueAtTime(0, t);
+      out.gain.linearRampToValueAtTime(pk, t + P.a);
+      if (P.pluck) out.gain.exponentialRampToValueAtTime(Math.max(0.0005, pk * P.s), t + P.a + P.d);
+      else { out.gain.linearRampToValueAtTime(pk * P.s, t + P.a + P.d); out.gain.setValueAtTime(pk * P.s, Math.max(t + P.a + P.d, end)); }
+      out.gain.setValueAtTime(out.gain.value, end);
+      out.gain.exponentialRampToValueAtTime(0.0001, end + rel);
+      // filtro
+      let node = out;
+      const fl = c.createBiquadFilter(); fl.type = P.ft || 'lowpass'; fl.Q.value = P.fq || 0.7;
+      const fc = x => Math.min(16000, Math.max(80, x < 30 ? f * x : x));
+      fl.frequency.setValueAtTime(fc(P.f0), t);
+      if (P.f1 !== undefined) fl.frequency.exponentialRampToValueAtTime(fc(P.f1), t + (P.ft1 || 0.3));
+      fl.connect(out); nodes.push(fl);
+      // vibrato
+      let vib = null;
+      if (P.vib) {
+        const lfo = c.createOscillator(); lfo.frequency.value = P.vib[0];
+        const lg = c.createGain(); lg.gain.setValueAtTime(0, t); lg.gain.setValueAtTime(0, t + P.vib[2]); lg.gain.linearRampToValueAtTime(f * P.vib[1], t + P.vib[2] + 0.25);
+        lfo.connect(lg); vib = lg; nodes.push(lfo, lg);
+      }
+      for (const o of P.osc) {
+        const os = c.createOscillator();
+        if (o.wave === 'organ') os.setPeriodicWave(this._organWave());
+        else if (o.wave === 'pluck') os.setPeriodicWave(this._pluckWave());
+        else os.type = o.wave;
+        os.frequency.value = f * (o.m || 1);
+        if (o.det) os.detune.value = o.det;
+        if (vib) vib.connect(os.frequency);
+        const g = c.createGain(); g.gain.value = o.g;
+        if (o.decay) { g.gain.setValueAtTime(o.g, t); g.gain.exponentialRampToValueAtTime(o.g * 0.05, t + o.decay); }
+        os.connect(g); g.connect(fl); nodes.push(os, g);
+      }
+      // sopro / ataque com ruído
+      if (P.noise) this._noiseHit(t, P.noise[2], P.noise[1] < 30 ? f * P.noise[1] : P.noise[1], P.noise[0] * vel, out, 'bandpass', 1.2);
+      out.connect(dest);
+      nodes.forEach(n => { if (n.start) { n.start(t); n.stop(end + rel + 0.05); } });
+      this._track(nodes.concat([out]), end + rel);
+    }
+    _organWave() {
+      if (this._ow) return this._ow;
+      const n = 12, re = new Float32Array(n), im = new Float32Array(n);
+      [0, 1, 0.8, 0.5, 0.6, 0, 0.3, 0, 0.35].forEach((v, i) => { if (i < n) im[i] = v; });
+      return (this._ow = this.ctx.createPeriodicWave(re, im));
+    }
+    _pluckWave() {
+      if (this._pw) return this._pw;
+      const n = 24, re = new Float32Array(n), im = new Float32Array(n);
+      for (let k = 1; k < n; k++) im[k] = Math.sin(k * Math.PI * 0.18) / (k * 0.9);
+      return (this._pw = this.ctx.createPeriodicWave(re, im));
     }
 
     // ---------- bateria ----------
@@ -2926,8 +3026,9 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
         let d = Math.min(n.d, limit - n.t) / sp;
         d *= n.staccato ? 0.45 : 0.92;
         const midi = n.midi + 12 * (p.octave || 0);
-        if (p.isBass) this._bass(at(n.t), d, midi, bus, n.vel || 1);
-        else this._keys(at(n.t), d, midi, bus, n.vel || 1, 0.22);
+        const inst = p.inst || (p.isBass ? 'baixo' : 'piano');
+        if (inst === 'baixo') this._bass(at(n.t), d, midi, bus, n.vel || 1);
+        else this._synth(inst, at(n.t), d, midi, bus, n.vel || 1);
       }
       for (; cur.chords < tl.chords.length && tl.chords[cur.chords].t < toSec; cur.chords++) {
         const c = tl.chords[cur.chords];
@@ -3310,7 +3411,7 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
     drawScore();
     // configurações salvas
     const set = rec.settings || {};
-    const parts = score.parts.map((p, i) => { const s = (set.parts || [])[i] || {}; return { name: p.name, isBass: p.isBass, vol: s.vol ?? 0.75, mute: !!s.mute, octave: s.octave ?? p.defaultOctave, notes: p.notes }; });
+    const parts = score.parts.map((p, i) => { const s = (set.parts || [])[i] || {}; return { name: p.name, isBass: p.isBass, vol: (s.vol === undefined || s.vol === 0.75) ? 1.2 : s.vol, mute: !!s.mute, octave: s.octave ?? p.defaultOctave, notes: p.notes, inst: s.inst || (p.isBass ? 'baixo' : 'piano') }; });
     engine.setTimeline(tl, parts);
     cur.baseBpm = Math.round(tl.baseBpm);
     engine.speed = set.bpm ? set.bpm / tl.baseBpm : 1;
@@ -3326,8 +3427,9 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
     const vp = engine.voice.part, vpart = score.parts[vp] || {};
     cur.fbOn = set.fbOn ?? !!vpart.isBass; cur.strings = set.strings || 4;
     cur.drumStyle = set.drumStyle || ''; cur.drumFills = set.drumFills ?? true;
-    engine.vol.drums = set.drumVol ?? 0.7;
+    engine.vol.drums = set.drumVol ?? 0.55;
     engine.bassTone = set.bassTone || 'dedo';
+    engine.bassBoost = set.bassBoost ?? true;
     setupExtras();
     Object.assign(engine.ramp, { on: !!set.rampOn, start: (set.rampStart || 60) / 100, step: (set.rampStep || 5) / 100, target: (set.rampTarget || 100) / 100 });
     syncPanel(set);
@@ -3353,7 +3455,7 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
       bpm: Math.round(engine.speed * cur.tl.baseBpm), metronome: engine.metronome, countIn: engine.countIn, chordsOn: $('#chords-on').checked,
       chordStyle: engine.chordStyle, chordsVol: engine.vol.chords, clickVol: engine.vol.click,
       voiceOn: engine.voice.on, voiceMode: engine.voice.mode, voiceVol: engine.voice.vol, voiceRange: engine.voice.range, voicePart: engine.voice.part,
-      parts: engine.parts.map(p => ({ vol: p.vol, mute: p.mute, octave: p.octave })),
+      parts: engine.parts.map(p => ({ vol: p.vol, mute: p.mute, octave: p.octave, inst: p.inst })), bassBoost: engine.bassBoost,
       loop: { on: $('#loop-on').checked, from: $('#loop-from').value, to: $('#loop-to').value },
       swing: cur.swing, expressive: cur.expressive,
       fbOn: cur.fbOn, strings: cur.strings, drumStyle: cur.drumStyle, drumFills: cur.drumFills, drumVol: engine.vol.drums, bassTone: engine.bassTone,
@@ -3398,9 +3500,14 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
     $('#ramp-start').value = Math.round(engine.ramp.start * 100); $('#ramp-step').value = Math.round(engine.ramp.step * 100); $('#ramp-target').value = Math.round(engine.ramp.target * 100);
     $('#parts').innerHTML = engine.parts.map((p, i) => `<div class="part" data-i="${i}">
       <label class="switch"><input type="checkbox" data-k="on" ${p.mute ? '' : 'checked'}><span></span> Tocar ${esc(p.name)}</label>
-      <div class="pctl"><input type="range" min="0" max="100" value="${Math.round(p.vol * 100)}" data-k="vol" aria-label="Volume">
+      <div class="row between"><span class="muted">Som</span><select data-k="inst">${'<option value="baixo">Baixo elétrico</option>' + Object.entries(INSTRUMENTS).map(([k, v]) => `<option value="${k}">${v.name}</option>`).join('')}</select></div>
+      <div class="pctl"><span class="muted small">Volume</span><input type="range" min="0" max="200" value="${Math.round(p.vol * 100)}" data-k="vol" aria-label="Volume">
       <select data-k="octave"><option value="-2">2 oitavas abaixo</option><option value="-1">1 oitava abaixo</option><option value="0">como escrito</option><option value="1">1 oitava acima</option></select></div></div>`).join('');
-    $$('#parts select').forEach((s, i) => s.value = String(engine.parts[i].octave));
+    $$('#parts .part').forEach((row, i) => {
+      row.querySelector('select[data-k="octave"]').value = String(engine.parts[i].octave);
+      row.querySelector('select[data-k="inst"]').value = engine.parts[i].inst || 'baixo';
+    });
+    $('#bass-boost').checked = engine.bassBoost;
   }
   $('#parts').addEventListener('input', e => {
     const el = e.target, row = el.closest('.part'); if (!row) return;
@@ -3408,6 +3515,14 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
     if (el.dataset.k === 'on') p.mute = !el.checked;
     if (el.dataset.k === 'vol') p.vol = el.value / 100;
     if (el.dataset.k === 'octave') p.octave = parseInt(el.value, 10);
+    if (el.dataset.k === 'inst') {
+      p.inst = el.value;
+      // oitava sugerida: baixo soa 1 oitava abaixo; os outros, como escrito (ou acima, se for muito grave)
+      const so = row.querySelector('select[data-k="octave"]');
+      if (el.value === 'baixo' && p.octave === 0 && p.isBass) { p.octave = -1; so.value = '-1'; }
+      else if (el.value !== 'baixo' && p.octave < 0) { p.octave = p.isBass ? (['violao', 'guitarra', 'piano', 'epiano', 'orgao', 'cordas', 'trombone', 'synth'].includes(el.value) ? 0 : 1) : 0; so.value = String(p.octave); }
+      $('#bass-tone-row').hidden = !engine.parts.some(x => (x.inst || 'baixo') === 'baixo');
+    }
     engine.applyMix(); save();
   });
   function setBpm(b) {
@@ -3459,6 +3574,7 @@ select{background:var(--bg);border:1px solid var(--line);border-radius:8px;paddi
   $('#drum-fills').addEventListener('change', e => restartIfPlaying(() => { cur.drumFills = e.target.checked; if (cur.drumStyle) engine.drums = Drums.make(cur.tl, cur.drumStyle, { fills: cur.drumFills }); save(); }));
   $('#drum-vol').addEventListener('input', e => { engine.vol.drums = e.target.value / 100; engine.applyMix(); save(); });
   $('#bass-tone').addEventListener('change', e => { engine.bassTone = e.target.value; save(); });
+  $('#bass-boost').addEventListener('change', e => { engine.bassBoost = e.target.checked; save(); });
   $('#fb-on').addEventListener('change', e => { cur.fbOn = e.target.checked; setupExtras(); updateNow(true); save(); });
   $('#fb-strings').addEventListener('change', e => { cur.strings = +e.target.value; setupExtras(); updateNow(true); save(); });
 
